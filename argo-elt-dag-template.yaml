@@ -1,0 +1,95 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: dbt-deployment-template
+spec:
+  entrypoint: dbt-pipeline
+  volumes:
+  - name: dbt-profiles
+    secret:
+      secretName: dbt-profiles-secret
+  templates:
+  - name: dbt-pipeline
+    dag:
+      tasks:
+      - name: source-tests
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "test --select source:*"
+      - name: stg-tests
+        dependencies: [source-tests]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "test --select staging.stg_*"
+      - name: stg-run-1
+        dependencies: [stg-tests]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "run --select staging.stg_tpch_orders"
+      - name: stg-run-2
+        dependencies: [stg-tests]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "run --select staging.stg_tpch_line_items"
+      - name: int-tests
+        dependencies: [stg-run-1, stg-run-2]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "test --select marts.int_*"
+      - name: int-run
+        dependencies: [int-tests]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "run --select marts.int_*"
+      - name: fct-tests
+        dependencies: [int-run]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "test --select marts.fct_* --exclude test_invalid_item_discount"
+      - name: fct-run
+        dependencies: [fct-tests]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "run --select marts.fct_*"
+      - name: discount-test
+        dependencies: [fct-run]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "test --select test_invalid_item_discount --store-failures || true"
+      - name: log-invalid-discount
+        dependencies: [discount-test]
+        template: run-dbt
+        arguments:
+          parameters:
+          - name: dbt-command
+            value: "run-operation log_invalid_item_discount"
+  - name: run-dbt
+    inputs:
+      parameters:
+      - name: dbt-command
+    container:
+      image: xwoodpecker/argo-elt-dag-secure:latest
+      command: ["sh", "-c"]
+      args: ["dbt {{inputs.parameters.dbt-command}}"]
+      volumeMounts:
+      - name: dbt-profiles
+        mountPath: /root/.dbt
+        readOnly: true
